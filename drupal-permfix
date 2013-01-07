@@ -1,0 +1,299 @@
+#!/bin/bash
+#***************************************************************************
+# drupal-permfix -- This script will set the perms correctly after updates 
+#	and so forth.
+#
+#	Usage:
+#		drupal-permfix [-h] [-y] [-u user] [-g group] destdir
+#
+# Mod 20110822 - Added sanity checking.
+# Mod 20111004 - Added checks for empty dirs to reduce errors
+# Mod 20120228 - Added a flag to enable group perms to be same as user perms
+# Mod 20120314 - Improved error handling & group perm handling. Added -s flag
+# Mod 20120321 - Eliminated need for -s, added -u for user, sanity checking 
+#                for user & group
+# Mod 20120323 - Added sanity check for embedded drupal sites & non standard
+#		 directories.
+# Mod 20120326 - Added an option to run non-interactively for use in scripts
+#		 and cron and also syslog logging.
+# Mod 20120924 - Added a check for files in cache dir to avoid chmod error.
+# Mod 20130107 - Changed Perms to work with mod_ruid2
+#
+# Peter Thompson-Yezek <yezek@uni.edu>
+# Ryan Murphy <ryan.murphy@uni.edu>
+#***************************************************************************
+
+DOCROOT=/export/home
+HTTPUSER=apache
+HTTPGROUP=apache
+DEST=
+ARGGROUP=
+ARGUSER=
+D7FILES=( authorize.php cache CHANGELOG.txt COPYRIGHT.txt cron.php .gitignore .htaccess 
+	  includes index.php INSTALL.mysql.txt INSTALL.pgsql.txt install.php INSTALL.sqlite.txt 
+	  INSTALL.txt LICENSE.txt MAINTAINERS.txt misc modules profiles README.txt robots.txt 
+	  scripts sites themes update.php UPGRADE.txt web.config xmlrpc.php )
+D6FILES=( cache CHANGELOG.txt COPYRIGHT.txt cron.php .htaccess includes index.php INSTALL.mysql.txt 
+	  INSTALL.pgsql.txt install.php INSTALL.txt LICENSE.txt MAINTAINERS.txt misc modules profiles 
+	  robots.txt scripts sites themes update.php UPGRADE.txt xmlrpc.php )
+
+
+#-----------------------------------------------
+log() { 
+	logger -t drupal-permfix -p info -- "$@"
+	echo "$@"; 
+}
+
+
+#-----------------------------------------------
+usage() {
+cat << EOF
+usage: $0 options
+
+This script will set the permissions correctly for a Drupal 6 or 7 install.
+Optionally, a group can be specified and the group permissions will be set
+to match the user permissions.  This is only advisable on DEV and STAGE
+however, as production sites generally belong to very large groups such as
+infosys, staff and student.
+
+drupal-permfix [-h] [-y] [-u user] [-g group] destdir
+  
+OPTIONS:
+   -h		Show this message
+   -y		[optional] Non-interactive mode, assumes y to all questions.
+   -u user	[optional] Chowns site to "user" 
+   -g group	[optional] Assigns group permissions to site for "group"
+   site		[required] Directory under $DOCROOT to work on
+EOF
+}
+
+
+#-----------------------------------------------
+arraydiff() {
+awk 'BEGIN{RS=ORS=" "}
+	{NR==FNR?a[$0]++:a[$0]--}
+	END{for(k in a)if(a[k])print k}' <(echo -n "${!1}") <(echo -n "${!2}")
+}
+
+
+#-----------------------------------------------
+nondrupal() {
+if (( ${#NONSTANDARDFILES[@]} > 0 )); then
+	echo; log "WARNING: Non-standard files/directories found in drupal site:"
+	echo
+	for i in "${NONSTANDARDFILES[@]}"; do
+		TEMP=`ls -ld $DOCROOT/$DEST/$i`
+		log "$TEMP"
+	done
+	echo; log "These files might have their user, group and permissions modified."
+	if [[ -n $NONINTERACTIVE ]]; then
+		echo
+		echo "  !! Please make note of the above and double check them after the permfix process is done !!"
+		echo
+	else
+		read -r -p "Do you want to continue anyway? [Y/n] " response
+		case $response in
+			[yY][eE][sS]|[yY]) 
+				echo
+				echo "  !! Please make note of the above and double check them after the permfix process is done !!"
+				echo
+				;;
+			*)
+				exit
+				;;
+		esac
+	fi
+fi
+}
+
+
+#-----------------------------------------------
+logger -t drupal-permfix -p info -- "$@"
+while getopts “hyu:g:” OPTION
+do
+     case $OPTION in
+	h)
+		usage
+		exit 1
+		;;
+	y)	NONINTERACTIVE=1
+		;;
+	u)
+		ARGUSER=$OPTARG       		
+		;;
+	g)
+		ARGGROUP=$OPTARG       		
+		;;
+	?)
+             usage
+             exit
+             ;;
+     esac
+done
+shift $(($OPTIND - 1))
+DEST=$1
+
+
+#-----------------------------------------------
+echo
+echo "Performing sanity check on your request, foolish human!"
+if [[ -z $DEST ]]; then
+	echo; echo
+	log "  ERROR: You must specify a directory to fix or horrible, terrible, INCREDIBLY BAD things will happen!!"
+	echo; echo
+	exit 1
+fi
+if [[ ! -d $DOCROOT/$DEST ]]; then
+	echo; echo
+	log "  ERROR: The directory $DOCROOT/$DEST does not exist!"
+	echo; echo
+	exit
+fi
+if [[ ! -f $DOCROOT/$DEST/sites/default/settings.php ]]; then
+	echo; echo
+	log "  ERROR: The directory $DOCROOT/$DEST does not look like a drupal install to me."
+	echo; echo
+	exit
+fi
+
+if grep -q "^Drupal 7." $DOCROOT/$DEST/CHANGELOG.txt; then
+	DRUPALVERSION=7
+	DESTFILES=( `ls -1a $DOCROOT/$DEST | grep -v "^\.*$"` )
+	NONSTANDARDFILES=($(arraydiff DESTFILES[@] D7FILES[@]))
+	nondrupal
+elif grep -q "^Drupal 6." $DOCROOT/$DEST/CHANGELOG.txt; then
+	DRUPALVERSION=6
+	DESTFILES=( `ls -1a $DOCROOT/$DEST | grep -v "^\.*$"` )
+	NONSTANDARDFILES=($(arraydiff DESTFILES[@] D6FILES[@]))
+	nondrupal
+else
+	echo; echo
+	log "ERROR: Drupal version can not be determined."
+	exit
+fi
+
+if ! grep -q "^$ARGUSER" /etc/passwd; then
+	echo; echo
+	log "  ERROR: The user $ARGUSER is not in /etc/passwd."
+	echo; echo
+	exit
+fi
+if ! grep -q "^$ARGGROUP" /etc/group; then
+	echo; echo
+	log "  ERROR: The user $ARGGROUP is not in /etc/group."
+	echo; echo
+	exit
+fi
+
+echo "Your request seems reasonably sane."
+echo
+
+
+#-----------------------------------------------
+log "  - Drupal Version $DRUPALVERSION detected."
+if [[ -z $ARGUSER ]]; then
+	DESTUSER=`stat -c %U $DOCROOT/$DEST`
+	log "  - Keeping $DEST owned by $DESTUSER" 
+else
+	log "  - Setting user for $DEST to $ARGUSER"
+	chown $ARGUSER $DOCROOT/$DEST
+	DESTUSER=`stat -c %U $DOCROOT/$DEST`
+fi
+
+if [[ -z $ARGGROUP ]]; then
+	DIRPERM=755
+	FILEPERM=644
+	log "  - Setting user perms only, group perms will be set to defaults."
+else
+	log "  - Setting group for $DEST to $ARGGROUP"
+	chgrp $ARGGROUP $DOCROOT/$DEST
+	log "  - Setting group perms the same as user perms."
+	DIRPERM=755
+	FILEPERM=644
+fi
+DESTGROUP=`stat -c %G $DOCROOT/$DEST`
+
+
+#--------------------------------------------------------------------
+ log "  - Blanket perm/owner/group fix"
+chown -R $DESTUSER:$DESTGROUP $DOCROOT/$DEST
+chmod $DIRPERM $DOCROOT/$DEST
+find $DOCROOT/$DEST -type d -print0 | xargs -0 chmod $DIRPERM
+find $DOCROOT/$DEST -type f -print0 | xargs -0 chmod $FILEPERM
+
+if [ ! -d $DOCROOT/$DEST/cache ]; then
+	log "    - No cache directory found. Creating one."
+	mkdir $DOCROOT/$DEST/cache
+	log "    - This directory holds boost cache files" > $DOCROOT/$DEST/cache/README.CACHE
+fi
+
+#--------------------------------------------------------------------
+ log "  - Fix cache directory"
+chown -R $DESTUSER:$DESTGROUP $DOCROOT/$DEST/cache
+if [ "$(ls -A $DOCROOT/$DEST/cache)" ]; then
+	find $DOCROOT/$DEST/cache -type d -print0 | xargs -0 chmod $DIRPERM
+	if [[ `find $DOCROOT/$DEST/cache -type f` ]]; then
+		find $DOCROOT/$DEST/cache -type f -print0 | xargs -0 chmod $FILEPERM
+	fi
+fi
+
+
+#--------------------------------------------------------------------
+ log "  - Fix for sites/all"
+find $DOCROOT/$DEST/sites/all -type d -print0 | xargs -0 chmod $DIRPERM
+find $DOCROOT/$DEST/sites/all -type f -print0 | xargs -0 chmod $FILEPERM
+
+
+#--------------------------------------------------------------------
+ log "  - Fix for fonts directory"
+if [ -d $DOCROOT/$DEST/sites/all/modules/print/dompdf/lib/fonts ]; then
+	log "    - print module found, fixing $DOCROOT/$DEST/sites/all/modules/print/dompdf/lib/fonts"
+	chmod -R 754 $DOCROOT/$DEST/sites/all/modules/print/dompdf/lib/fonts
+	chgrp -R $HTTPGROUP $DOCROOT/$DEST/sites/all/modules/print/dompdf/lib/fonts
+	find $DOCROOT/$DEST/sites/all/modules/print/dompdf/lib/fonts -type f -print0 | xargs -0 chmod 664
+fi
+
+if [ -d $DOCROOT/$DEST/sites/all/modules/print/lib/dompdf ]; then
+	log "    - print module found, fixing $DOCROOT/$DEST/sites/all/modules/print/lib/dompdf"
+	chmod -R 754 $DOCROOT/$DEST/sites/all/modules/print/lib/dompdf/lib/fonts
+	chgrp -R $HTTPGROUP $DOCROOT/$DEST/sites/all/modules/print/lib/dompdf/lib/fonts
+	find $DOCROOT/$DEST/sites/all/modules/print/lib/dompdf/lib/fonts -type f -print0 | xargs -0 chmod 664
+fi
+
+if [ -d $DOCROOT/$DEST/sites/all/libraries/dompdf/lib/fonts ]; then
+	log "    - print module found, fixing $DOCROOT/$DEST/sites/all/libraries/dompdf/lib/fonts"
+	chmod -R 754 $DOCROOT/$DEST/sites/all/libraries/dompdf/lib/fonts
+	chgrp -R $HTTPGROUP $DOCROOT/$DEST/sites/all/libraries/dompdf/lib/fonts
+	find $DOCROOT/$DEST/sites/all/libraries/dompdf/lib/fonts -type f -print0 | xargs -0 chmod 664
+fi
+
+
+#--------------------------------------------------------------------
+ log "  - Fix for tcpdf/cache"
+
+if [ -d $DOCROOT/$DEST/sites/all/libraries/tcpdf/cache ]; then
+        log "    - tcpdf cache found, fixing $DOCROOT/$DEST/sites/all/libraries/tcpdf/cache"
+        chmod -R 754 $DOCROOT/$DEST/sites/all/libraries/tcpdf/cache
+        chgrp -R $HTTPGROUP $DOCROOT/$DEST/sites/all/libraries/tcpdf/cache
+        find $DOCROOT/$DEST/sites/all/libraries/tcpdf/cache -type f -print0 | xargs -0 chmod 664
+fi
+
+
+#--------------------------------------------------------------------
+ log "  - Fix sites/default/files"
+chown -R $DESTUSER:$DESTGROUP $DOCROOT/$DEST/sites/default/files
+chmod 754 $DOCROOT/$DEST/sites/default/files
+chmod a-s $DOCROOT/$DEST/sites/default/files
+find $DOCROOT/$DEST/sites/default/files -type d -print0 | xargs -0 chmod 775
+find $DOCROOT/$DEST/sites/default/files -type f -print0 | xargs -0 chmod 664
+
+
+#--------------------------------------------------------------------
+ log "  - Fix sites/default/settings.php"
+chown $DESTUSER:$DESTGROUP $DOCROOT/$DEST/sites/default/settings.php
+chmod 444 $DOCROOT/$DEST/sites/default/settings.php
+
+
+#-----------------------------------------------
+echo
+exit 0
